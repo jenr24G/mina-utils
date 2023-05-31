@@ -5,6 +5,7 @@ import base58
 import argparse
 import mina_voting_query as mvq
 import mina_voting_constants as mvc
+from decimal import *
 
 #####################
 # stake distribution
@@ -22,20 +23,20 @@ def download_ledger(ep: int, ledger_hash: str, src: str, verbose = False) -> lis
 
     Write local json
     '''
-    ledger_srcs = mvc.LEDGER_SOURCES.keys()
-    if src not in ledger_srcs:
-        print(f"Please provide a valid ledger source: {ledger_srcs}")
-        sys.exit(1)
+    # ledger_srcs = mvc.LEDGER_SOURCES.keys()
+    # if src not in ledger_srcs:
+    #     print(f"Please provide a valid ledger source: {ledger_srcs}")
+    #     sys.exit(1)
 
-    # prep local dir
-    ldir = mvc.ledger_loc(ep, ledger_hash)
-    if not ldir.exists():
-        os.mkdir(ldir)
+    # # prep local dir
+    # ldir = mvc.ledger_loc(ep, ledger_hash)
+    # if not ldir.exists():
+    #     os.mkdir(ldir)
 
-    # write the ledger
-    if verbose:
-        print(f"Downloading ledger with hash {ledger_hash} from {mvc.LEDGER_SOURCES[src]}...")
-    mvq.get_next_staking_ledger(ep, ledger_hash, src)
+    # # write the ledger
+    # if verbose:
+    #     print(f"Downloading ledger with hash {ledger_hash} from {mvc.LEDGER_SOURCES[src]}...")
+    # mvq.get_next_staking_ledger(ep, ledger_hash, src)
 
     # load the ledger
     if verbose:
@@ -60,15 +61,15 @@ def parse_ledger(raw_ledger: list) -> list:
     ledger = filter(lambda d: filter_dict_keys(essential, d), raw_ledger)
     return list(ledger)
 
-def aggregate_stake(ledger: list, ep: int, verbose = False) -> dict:
+def aggregate_stake(ledger: list, ep: int, verbose = False) -> tuple[dict, dict]:
     '''
-    Returns aggregated stake
+    Returns aggregated stake, and balances of delegating accounts
     '''
     if verbose:
         print("Aggregating stake...")
 
     agg_stake = {}
-    delegations: dict[str, list] = {}
+    delegations: dict[str, dict[str, any]] = {}
     self_delegations = set()
     non_self_delegations = set()
 
@@ -77,19 +78,20 @@ def aggregate_stake(ledger: list, ep: int, verbose = False) -> dict:
     for account in ledger:
         pk = account['pk']
         dg = account['delegate']
-        bal = float(account['balance'])
-
+        bal = Decimal(account['balance'])
+        
+        delegate = get_account(ledger, dg)
         try:
-            delegations[pk].add(dg)
+            delegations[pk][dg] = Decimal(delegate['balance'])
         except:
-            delegations[pk] = [dg]
+            delegations[pk] = { dg: Decimal(delegate['balance'])}
 
         # distinguish
-        try:
-            if delegations[pk] == [pk]:
-                self_delegations.add(pk)
-        except:
+        if pk in delegations[pk]:
+            self_delegations.add(pk)
+        else:
             non_self_delegations.add(pk)
+            
 
         # sum delegated balances
         try:
@@ -109,7 +111,7 @@ def aggregate_stake(ledger: list, ep: int, verbose = False) -> dict:
         f.write(mvq.pp(agg_stake))
         f.close()
 
-    return agg_stake
+    return agg_stake, delegations
 
 ########
 # votes
@@ -183,6 +185,10 @@ def parse_transactions(per_block_tx_data: dict, keyword: str) -> tuple[dict, int
     for tx in txns:
         num_txs += 1
         pk = tx["source"]["publicKey"]
+        
+        memo = decode_memo(tx["memo"])
+        if "kimchi" in memo:
+            print(memo)
 
         if is_vote(tx, keyword):
             memo = tx["memo"]
@@ -217,7 +223,7 @@ def get_account(ledger: list, pubkey: str) -> dict:
             break
     return res
 
-def mk_csv(num_txns: int, yes_votes: int, no_votes: int, vote_stake: dict, yes_stake: float, no_stake: float, yes_weight: float, no_weight: float) -> str:
+def mk_csv(num_txns: int, yes_votes: int, no_votes: int, vote_stake: dict, yes_stake: Decimal, no_stake: Decimal, yes_weight: Decimal, no_weight: Decimal) -> str:
     return """Num_epoch_txns,Num_yes_votes,Num_no_votes,Total_vote_stake,Yes_vote_stake,No_vote_stake,Yes_vote_weight,No_vote_weight
 %s,%s,%s,%s,%s,%s,%s,%s
 """ % (num_txns, yes_votes, no_votes, vote_stake, yes_stake, no_stake, yes_weight, no_weight)
@@ -328,7 +334,7 @@ def prep_args(args, test = False) -> dict[str, list]:
     lloc = mvc.ledger_loc(ep, ledger_hash)
 
     if not lloc.exists():
-        raw_ledger_list = download_ledger(ep, ledger_hash, endpoint)
+        raw_ledger_list = download_ledger(ep, ledger_hash, "zkvalidator")
 
     else:
         # otherwise load
@@ -339,14 +345,14 @@ def prep_args(args, test = False) -> dict[str, list]:
     ledger_list = parse_ledger(raw_ledger_list)
 
     # only aggregate stake if we haven't done so already
-    if not mvc.agg_stake_loc(ep).exists():
-        agg_stake = aggregate_stake(ledger_list, ep)
+    # if not mvc.agg_stake_loc(ep).exists():
+    agg_stake, delegations = aggregate_stake(ledger_list, ep)
 
-    else:
-        # otherwise load
-        with mvc.agg_stake_loc(ep).open("r", encoding="utf-8") as f:
-            agg_stake = json.load(f)
-            f.close()
+    # else:
+    #     # otherwise load
+    #     with mvc.agg_stake_loc(ep).open("r", encoding="utf-8") as f:
+    #         agg_stake = json.load(f)
+    #         f.close()
 
     # only download transactions if we don't already have them
     if not mvc.txns_loc(ep).exists():
@@ -366,9 +372,9 @@ def prep_args(args, test = False) -> dict[str, list]:
 
     # parse transactions and display results
     votes, num_txns = parse_transactions(raw_tx_data, keyword)
-    return results(ledger_list, agg_stake, votes, keyword, num_txns, ep, ledger_hash)
+    return results(ledger_list, agg_stake, delegations, votes, keyword, num_txns, ep, ledger_hash)
 
-def results(ledger_list, agg_stake, votes, keyword, num_txns, ep, ledger_hash, report = False) -> dict[str, list]:
+def results(ledger_list, agg_stake, delegations, votes, keyword, num_txns, ep, ledger_hash, report = False) -> dict[str, list]:
     '''
     Returns all results `num`, `keys`, `ledger`, `stake`, `votes`, `weight`
     '''
@@ -403,14 +409,34 @@ def results(ledger_list, agg_stake, votes, keyword, num_txns, ep, ledger_hash, r
         if pk in agg_stake.keys():
             # sum yes stake
             if in_favor(memo, keyword):
+                agg_stake_pk = agg_stake[pk]
+                
+                for dk in delegations[pk]:
+                    delegate_vote = votes[dk]
+                    if not in_favor(delegate_vote[0], keyword):
+                        yes_stake -= delegations[pk][dk]
+                        no_votes += 1
+                    else:
+                        yes_votes += 1
+                
                 yes_votes += 1
                 try:
-                    yes_stake += agg_stake[pk]
+                    yes_stake += agg_stake_pk
                 except:
                     pass
 
             # sum no stake
             elif against(memo, keyword):
+                agg_stake_pk = agg_stake[pk]
+                
+                for dk in delegations[pk]:
+                    delegate_vote = votes[dk]
+                    if not against(delegate_vote[0], keyword):
+                        no_stake -= delegations[pk][dk]
+                        yes_votes += 1
+                    else:
+                        no_votes += 1
+                
                 no_votes += 1
                 try:
                     no_stake += agg_stake[pk]
@@ -495,7 +521,7 @@ def weight_or_delegation(ledger: list, dist: dict, pk: str, is_delegation: bool)
         else:
             return "N/A"
 
-def total(ep: int, ledger_hash: str) -> float:
+def total(ep: int, ledger_hash: str) -> Decimal:
     with mvc.ledger_loc(ep, ledger_hash).open("r", encoding="utf-8") as f:
         raw_ledger = json.load(f)
         ledger = parse_ledger(raw_ledger)
@@ -503,7 +529,7 @@ def total(ep: int, ledger_hash: str) -> float:
 
     res = 0
     for account in ledger:
-        res += float(account['balance'])
+        res += Decimal(account['balance'])
 
     return res
 
@@ -540,7 +566,7 @@ if __name__ == '__main__':
     parser.add_argument("-kw", type=str, nargs=1, help="MIP keyword")
     parser.add_argument("-ep", type=int, nargs=1, help="Voting epoch number")
     parser.add_argument("-lh", type=str, nargs="*", help="Staking ledger hash")
-    parser.add_argument("-start", type=str, nargs=1, help="Voting period start time (in your local timezone) - ISO-8601 YY-mm-ddTHH:MM:SS")
+    parser.add_argument("-start", type=str, nargs=1, help="Voting period start time (in your local timezone) - ISO-8601 YY-mm-ddTHH:MM:SSZ")
     parser.add_argument("-end", type=str, nargs=1, help="Voting period end time (in your local timezone) - ISO-8601 YY-mm-ddTHH:MM:SSZ")
     parser.add_argument("-v",  action="store_true", help="Verbose - shows all votes with memos decoded")
     parser.add_argument("-gql", type=str, nargs="*", help=f"GraphQL endpoint (default: {mvc.MINA_EXPLORER})")
@@ -561,6 +587,7 @@ if __name__ == '__main__':
     votes = res['votes']
     ledger = res['ledger']
     ledger_hash = res['hash']
+    delegations = res['delegations']
 
     # display results
-    display(results(list(ledger), stake[0], votes[0], key, num, ep, ledger_hash, report=args.report))
+    display(results(list(ledger), stake[0], delegations[0], votes[0], key, num, ep, ledger_hash, report=args.report))

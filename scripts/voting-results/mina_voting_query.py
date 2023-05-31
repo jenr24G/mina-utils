@@ -1,3 +1,4 @@
+from decimal import Decimal
 import os
 import sys
 import json
@@ -5,8 +6,14 @@ import pathlib
 import requests
 import mina_voting_constants as mvc
 
+class DecimalEncoder(json.JSONEncoder):
+  def default(self, obj):
+    if isinstance(obj, Decimal):
+      return str(obj)
+    return json.JSONEncoder.default(self, obj, cls=DecimalEncoder)
+
 def pp(resp):
-	  return json.dumps(resp, indent=4)
+	  return json.dumps(resp, indent=4, cls=DecimalEncoder)
 
 def get_next_staking_ledger_granola_github_auth(ep: int, ledger_hash: str, repo: str):
     '''
