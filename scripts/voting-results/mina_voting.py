@@ -457,6 +457,7 @@ def results(ledger_list, agg_stake, delegations, votes, keyword, num_txns, ep, l
         'votes' : [votes, yes_votes, no_votes],
         'weight': [vote_weight, yes_weight, no_weight],
         'ledger': ledger_list,
+        'delegations': delegations
     }
 
 ##########
